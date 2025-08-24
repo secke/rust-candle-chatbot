@@ -1,20 +1,20 @@
-use anyhow::{Result, Context};
-use candle_core::{Device, Tensor, DType, utils};
+use anyhow::Result;
+use candle_core::{Device, Tensor, DType};
 use candle_nn;
 use candle_transformers::models::quantized_llama::ModelWeights;
 use clap::Parser;
 use cursive::{
-    event::Key,
+    event::Event,
     theme::{BaseColor, BorderStyle, Color, PaletteColor, Theme},
     traits::{Nameable, Resizable, Scrollable},
     utils::markup::StyledString,
     views::{
-        Button, Dialog, EditView, LinearLayout, Panel, ScrollView, 
+        Button, Dialog, EditView, LinearLayout, Panel,
         TextView, DummyView, OnEventView,
     },
     Cursive, CursiveExt,
 };
-use hf_hub::{api::tokio::Api, Repo, RepoType};
+// use hf_hub::api::tokio::Api;
 use rand::Rng;
 use std::sync::{Arc, Mutex};
 use tokenizers::Tokenizer;
@@ -64,13 +64,10 @@ struct ChatState {
 
 impl ChatState {
     fn new(args: Args) -> Result<Self> {
-        let device = if utils::cuda_is_available() {
-            Device::new_cuda(0)?
-        } else {
-            Device::Cpu
-        };
+        // Use CPU only - no CUDA in codespace
+        let device = Device::Cpu;
         
-        println!("Using device: {:?}", device);
+        println!("Using device: CPU");
         
         Ok(Self {
             messages: Vec::new(),
@@ -91,7 +88,16 @@ impl ChatState {
         // Load the quantized model
         println!("Loading quantized model from {:?}...", self.args.model_path);
         let mut file = std::fs::File::open(&self.args.model_path)?;
-        let model = ModelWeights::from_gguf(&mut file, &self.device)?;
+        
+        // Read GGUF file content first
+        let content = candle_core::quantized::gguf_file::Content::read(&mut file)
+            .map_err(|e| anyhow::anyhow!("Failed to read GGUF content: {}", e))?;
+        
+        // Reset file position
+        file = std::fs::File::open(&self.args.model_path)?;
+        
+        // Load model with content
+        let model = ModelWeights::from_gguf(content, &mut file, &self.device)?;
         
         *self.model.lock().unwrap() = Some(model);
         
@@ -103,15 +109,23 @@ impl ChatState {
     }
     
     async fn download_model(&self) -> Result<()> {
-        let api = Api::new()?;
-        let repo = api.repo(Repo::model("QuantFactory/Llama-3.2-3B-Instruct-GGUF".to_string()));
+        use hf_hub::api::tokio::ApiBuilder;
+        
+        let api = ApiBuilder::new()
+            .with_progress(true)
+            .build()?;
+            
+        let repo = api.model("QuantFactory/Llama-3.2-3B-Instruct-GGUF".to_string());
         
         // Download the Q4_K_M quantized model
         let filename = "Llama-3.2-3B-Instruct.Q4_K_M.gguf";
         println!("Downloading {}...", filename);
         
-        let file = repo.get(filename).await?;
-        std::fs::write(&self.args.model_path, file)?;
+        // Download to local path
+        let downloaded_path = repo.get(filename).await?;
+        
+        // Copy to desired location
+        std::fs::copy(downloaded_path, &self.args.model_path)?;
         
         println!("Model downloaded successfully!");
         Ok(())
@@ -119,32 +133,42 @@ impl ChatState {
     
     async fn load_tokenizer(&self) -> Result<Tokenizer> {
         let tokenizer = if let Some(path) = &self.args.tokenizer_path {
-            Tokenizer::from_file(path)?
+            Tokenizer::from_file(path)
+                .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?
         } else {
             // Download tokenizer from HuggingFace
-            let api = Api::new()?;
-            let repo = api.repo(Repo::model("meta-llama/Llama-3.2-3B-Instruct".to_string()));
-            let tokenizer_data = repo.get("tokenizer.json").await?;
+            use hf_hub::api::tokio::ApiBuilder;
+            
+            let api = ApiBuilder::new()
+                .with_progress(true)
+                .build()?;
+                
+            let repo = api.model("meta-llama/Llama-3.2-3B-Instruct".to_string());
+            
+            println!("Downloading tokenizer from HuggingFace...");
+            let downloaded_path = repo.get("tokenizer.json").await?;
             
             // Save tokenizer for future use
             let tokenizer_path = PathBuf::from("tokenizer.json");
-            std::fs::write(&tokenizer_path, &tokenizer_data)?;
+            std::fs::copy(&downloaded_path, &tokenizer_path)?;
             
-            Tokenizer::from_bytes(tokenizer_data)?
+            // Load tokenizer from the downloaded file
+            Tokenizer::from_file(&tokenizer_path)
+                .map_err(|e| anyhow::anyhow!("Failed to create tokenizer: {}", e))?
         };
         
         Ok(tokenizer)
     }
     
     fn generate_response(&mut self, prompt: &str) -> Result<String> {
-        let model = self.model.lock().unwrap();
+        let mut model = self.model.lock().unwrap();
         let tokenizer = self.tokenizer.lock().unwrap();
         
         if model.is_none() || tokenizer.is_none() {
             return Err(anyhow::anyhow!("Model or tokenizer not loaded"));
         }
         
-        let model = model.as_ref().unwrap();
+        let model = model.as_mut().unwrap();
         let tokenizer = tokenizer.as_ref().unwrap();
         
         // Format the conversation with Llama3 chat template
@@ -385,12 +409,14 @@ fn build_ui(siv: &mut Cursive, state: Arc<Mutex<ChatState>>) {
     
     // Add keyboard shortcuts
     let layout = OnEventView::new(layout)
-        .on_event(Key::Ctrl('l'), |s| {
+        .on_event(Event::CtrlChar('l'), |s| {
             s.call_on_name("chat_view", |view: &mut TextView| {
                 view.set_content("Chat cleared.\n");
             });
         })
-        .on_event(Key::Ctrl('q'), |s| s.quit());
+        .on_event(Event::CtrlChar('q'), |s| {
+            s.quit();
+        });
     
     siv.add_fullscreen_layer(layout);
     
@@ -411,7 +437,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     
     // Create chat state
-    let mut chat_state = ChatState::new(args)?;
+    let chat_state = ChatState::new(args)?;
     
     // Load model in background
     let state_arc = Arc::new(Mutex::new(chat_state));
@@ -423,9 +449,16 @@ async fn main() -> Result<()> {
     
     // Load model in background
     let cb_sink = siv.cb_sink().clone();
-    tokio::spawn(async move {
-        let mut state = state_clone.lock().unwrap();
-        match state.load_model().await {
+    std::thread::spawn(move || {
+        // Use blocking runtime for async operations in thread
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        
+        let load_result = runtime.block_on(async {
+            let mut state = state_clone.lock().unwrap();
+            state.load_model().await
+        });
+        
+        match load_result {
             Ok(_) => {
                 cb_sink.send(Box::new(|s| {
                     s.pop_layer(); // Remove loading dialog

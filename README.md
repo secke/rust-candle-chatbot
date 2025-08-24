@@ -1,5 +1,6 @@
 # rust-candle-chatbot
 RCC is a LLM Terminal Chat - Rust-based Chatbot with Llama 3.2
+NOTE: It can run on entirely on CPU only
 
 A high-performance terminal-based chatbot built with Rust, featuring:
 - 🚀 **Candle** for fast ML inference
@@ -22,17 +23,14 @@ A high-performance terminal-based chatbot built with Rust, featuring:
 
 1. Clone the repository and navigate to the project:
    ```bash
-   mkdir llm-terminal-chat
-   cd llm-terminal-chat
+   git clone https://github.com/secke/rust-candle-chatbot.git
+   cd rust-candle-chatbot
    ```
 
-2. Create the project files:
-   - Save the `Cargo.toml` file
-   - Save the `main.rs` file in `src/` directory
 
-3. Build the project:
+2. Build the project:
    ```bash
-   cargo build --release
+   make build
    ```
 
 ## Obtaining the Model
@@ -41,7 +39,7 @@ A high-performance terminal-based chatbot built with Rust, featuring:
 Use the `--download` flag to automatically download the model from HuggingFace:
 
 ```bash
-cargo run --release -- --download
+make run_download
 ```
 
 ### Option 2: Manual Download
@@ -62,7 +60,7 @@ cargo run --release -- --model-path path/to/your/model.gguf
 
 ### Basic Usage
 ```bash
-cargo run --release
+make run
 ```
 
 ### With Custom Parameters
